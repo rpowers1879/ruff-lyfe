@@ -144,11 +144,12 @@ const BellIcon = ({ size = 20, color = BRAND.red }) => (
 // ============================================
 const DEFAULT_SETTINGS = {
   maxPetsAtHome: 4,
+  bufferDays: 1, // transition day between house sits or after boarding ends
   services: [
-    { id: "boarding", name: "Boarding (at my home)", price: 45, enabled: true, description: "Your pup stays at my place with 24/7 care, walks, and lots of love." },
-    { id: "housesitting", name: "House Sitting (at your home)", price: 55, enabled: true, description: "I come to your home so your pet stays in their comfort zone." },
-    { id: "daycare", name: "Doggy Day Care", price: 30, enabled: true, description: "Drop off in the morning, pick up in the evening. Fun guaranteed!" },
-    { id: "walkvisit", name: "Drop-In Visit / Walk", price: 20, enabled: true, description: "A 30-minute check-in, walk, and potty break." },
+    { id: "boarding", name: "Boarding (at my home)", price: 45, enabled: true, description: "Your pup stays at my place with 24/7 care, walks, and lots of love.", type: "boarding" },
+    { id: "housesitting", name: "House Sitting (at your home)", price: 55, enabled: true, description: "I come to your home so your pet stays in their comfort zone.", type: "housesitting" },
+    { id: "daycare", name: "Doggy Day Care", price: 30, enabled: true, description: "Drop off in the morning, pick up in the evening. Fun guaranteed!", type: "boarding" },
+    { id: "walkvisit", name: "Drop-In Visit / Walk", price: 20, enabled: true, description: "A 30-minute check-in, walk, and potty break.", type: "visit" },
   ],
   blockedDates: [],
   businessHours: { start: "08:00", end: "20:00" },
@@ -266,9 +267,121 @@ const NotificationBanner = ({ notifications, onDismiss }) => {
 };
 
 // ============================================
+// SCHEDULING ENGINE - handles conflicts, capacity, and buffers
+// ============================================
+
+// Helper: add/subtract days from a date string
+const addDays = (dateStr, n) => {
+  const d = new Date(dateStr + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toISOString().split("T")[0];
+};
+
+// Get detailed schedule info per day
+const getScheduleMap = (bookings, settings) => {
+  const map = {}; // dateStr -> { petCount, serviceTypes: Set, bookingIds: [], isBuffer: false, hasHouseSit: false, hasBoarding: false }
+  const bufferDays = settings.bufferDays || 0;
+  const activeBookings = bookings.filter(b => b.status === "confirmed" || b.status === "pending");
+
+  activeBookings.forEach(b => {
+    const serviceConfig = settings.services.find(s => s.id === b.service);
+    const serviceType = serviceConfig?.type || "boarding";
+
+    (b.dates || []).forEach(date => {
+      if (!map[date]) map[date] = { petCount: 0, serviceTypes: new Set(), bookingIds: [], isBuffer: false, hasHouseSit: false, hasBoarding: false };
+      map[date].petCount += (b.petCount || 1);
+      map[date].serviceTypes.add(serviceType);
+      map[date].bookingIds.push(b.id);
+      if (serviceType === "housesitting") map[date].hasHouseSit = true;
+      if (serviceType === "boarding" || serviceType === "visit") map[date].hasBoarding = true;
+    });
+
+    // Add buffer days around the booking
+    if (bufferDays > 0 && b.dates && b.dates.length > 0) {
+      const sorted = [...b.dates].sort();
+      const firstDate = sorted[0];
+      const lastDate = sorted[sorted.length - 1];
+
+      for (let i = 1; i <= bufferDays; i++) {
+        const beforeDate = addDays(firstDate, -i);
+        const afterDate = addDays(lastDate, i);
+
+        // Buffer BEFORE the booking
+        if (!map[beforeDate]) map[beforeDate] = { petCount: 0, serviceTypes: new Set(), bookingIds: [], isBuffer: false, hasHouseSit: false, hasBoarding: false };
+        if (serviceType === "housesitting") {
+          map[beforeDate].isBuffer = true;
+          map[beforeDate].bufferFor = "housesit";
+        }
+
+        // Buffer AFTER the booking
+        if (!map[afterDate]) map[afterDate] = { petCount: 0, serviceTypes: new Set(), bookingIds: [], isBuffer: false, hasHouseSit: false, hasBoarding: false };
+        if (serviceType === "housesitting") {
+          map[afterDate].isBuffer = true;
+          map[afterDate].bufferFor = "housesit";
+        }
+      }
+    }
+  });
+
+  return map;
+};
+
+// Check if a date is available for a specific service type
+const getDateAvailability = (dateStr, serviceType, scheduleMap, settings) => {
+  const day = scheduleMap[dateStr];
+  const maxCapacity = settings.maxPetsAtHome || 10;
+
+  // No bookings on this day - fully available
+  if (!day) return { available: true, reason: null, spotsLeft: serviceType === "housesitting" ? 1 : maxCapacity };
+
+  // Buffer day from a house sit
+  if (day.isBuffer && day.bufferFor === "housesit") {
+    if (serviceType === "housesitting") return { available: false, reason: "Buffer day (transition time)", spotsLeft: 0 };
+    // Boarding/visits can still happen on buffer days
+  }
+
+  // CONFLICT: House sitting blocks everything else (she's away from home)
+  if (day.hasHouseSit) {
+    return { available: false, reason: "House sitting booked (away from home)", spotsLeft: 0 };
+  }
+
+  // CONFLICT: If requesting house sitting but boarding/visits exist
+  if (serviceType === "housesitting" && (day.hasBoarding || day.petCount > 0)) {
+    return { available: false, reason: "Already has boarding/visits (can't leave home)", spotsLeft: 0 };
+  }
+
+  // House sitting - only 1 at a time
+  if (serviceType === "housesitting") {
+    return { available: true, reason: null, spotsLeft: 1 };
+  }
+
+  // Boarding/daycare - check pet capacity
+  const spotsLeft = maxCapacity - day.petCount;
+  if (spotsLeft <= 0) return { available: false, reason: "At max capacity", spotsLeft: 0 };
+
+  // Visits are lightweight - always available if no house sit
+  if (serviceType === "visit") return { available: true, reason: null, spotsLeft: maxCapacity };
+
+  return { available: true, reason: null, spotsLeft };
+};
+
+// Legacy helper for simple pet count (used by admin overview)
+const getBookedPetsPerDay = (bookings) => {
+  const counts = {};
+  bookings.forEach(b => {
+    if (b.status === "confirmed" || b.status === "pending") {
+      (b.dates || []).forEach(date => {
+        counts[date] = (counts[date] || 0) + (b.petCount || 1);
+      });
+    }
+  });
+  return counts;
+};
+
+// ============================================
 // CALENDAR
 // ============================================
-const Calendar = ({ selectedDates, onSelectDate, blockedDates = [] }) => {
+const Calendar = ({ selectedDates, onSelectDate, blockedDates = [], capacityMap = {}, maxCapacity = 0, showCapacity = false, scheduleMap = {}, serviceType = null, settings = null }) => {
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -283,6 +396,9 @@ const Calendar = ({ selectedDates, onSelectDate, blockedDates = [] }) => {
   for (let i = 0; i < firstDay; i++) days.push(null);
   for (let d = 1; d <= daysInMonth; d++) days.push(d);
 
+  // Use smart scheduling if serviceType + settings provided
+  const useSmartScheduling = serviceType && settings;
+
   return (
     <div style={{ fontFamily: "'DM Sans', sans-serif" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -290,6 +406,14 @@ const Calendar = ({ selectedDates, onSelectDate, blockedDates = [] }) => {
         <span style={{ fontWeight: 700, fontSize: 16, color: BRAND.darkText }}>{monthNames[month]} {year}</span>
         <button onClick={() => setCurrentMonth(new Date(year, month + 1))} style={{ background: "none", border: "none", cursor: "pointer", padding: 8, color: BRAND.red }}><ChevronRight /></button>
       </div>
+      {(showCapacity || useSmartScheduling) && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 12, fontSize: 11, color: BRAND.lightText, fontWeight: 600, flexWrap: "wrap" }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: BRAND.green, display: "inline-block" }} /> Open</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: "#E6A817", display: "inline-block" }} /> Filling Up</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: BRAND.red, display: "inline-block" }} /> Unavailable</span>
+          {useSmartScheduling && <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: "#9E9E9E", display: "inline-block" }} /> Buffer</span>}
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
         {dayNames.map(d => <div key={d} style={{ textAlign: "center", fontSize: 12, fontWeight: 700, color: BRAND.lightText, padding: "4px 0" }}>{d}</div>)}
         {days.map((d, i) => {
@@ -298,17 +422,53 @@ const Calendar = ({ selectedDates, onSelectDate, blockedDates = [] }) => {
           const blocked = blockedDates.includes(dateStr);
           const selected = selectedDates.includes(dateStr);
           const past = new Date(year, month, d) < today;
-          const disabled = blocked || past;
+
+          let isUnavailable = false;
+          let isAlmostFull = false;
+          let isBuffer = false;
+          let dotColor = null;
+          let titleText = "";
+          let spotsLeft = null;
+
+          if (useSmartScheduling && !past && !blocked) {
+            const avail = getDateAvailability(dateStr, serviceType, scheduleMap, settings);
+            isUnavailable = !avail.available;
+            spotsLeft = avail.spotsLeft;
+            isBuffer = scheduleMap[dateStr]?.isBuffer && !scheduleMap[dateStr]?.hasHouseSit;
+            isAlmostFull = avail.available && serviceType !== "visit" && serviceType !== "housesitting" && spotsLeft <= (settings.maxPetsAtHome || 10) * 0.3;
+            titleText = avail.reason || (avail.available ? `${spotsLeft} spot${spotsLeft !== 1 ? 's' : ''} left` : '');
+
+            if (isBuffer && isUnavailable) dotColor = "#9E9E9E";
+            else if (isUnavailable) dotColor = BRAND.red;
+            else if (isAlmostFull) dotColor = "#E6A817";
+            else if (scheduleMap[dateStr]?.petCount > 0) dotColor = BRAND.green;
+          } else if (showCapacity && maxCapacity > 0 && !past && !blocked) {
+            const booked = capacityMap[dateStr] || 0;
+            const isFull = booked >= maxCapacity;
+            isUnavailable = isFull;
+            isAlmostFull = booked >= maxCapacity * 0.7 && !isFull;
+            spotsLeft = maxCapacity - booked;
+            titleText = `${spotsLeft} spot${spotsLeft !== 1 ? 's' : ''} left`;
+            if (isFull) dotColor = BRAND.red;
+            else if (isAlmostFull) dotColor = "#E6A817";
+            else if (booked > 0) dotColor = BRAND.green;
+          }
+
+          const disabled = blocked || past || isUnavailable;
+
           return (
-            <button key={d} onClick={() => !disabled && onSelectDate(dateStr)} style={{
+            <button key={d} onClick={() => !disabled && onSelectDate(dateStr)} title={titleText} style={{
               width: "100%", aspectRatio: "1", borderRadius: 10, border: "none",
-              background: selected ? BRAND.red : blocked ? `${BRAND.red}10` : "transparent",
+              background: selected ? BRAND.red : isUnavailable && !past ? `${BRAND.red}08` : isBuffer && !past ? "#f0f0f0" : blocked ? `${BRAND.red}10` : "transparent",
               color: selected ? BRAND.white : disabled ? BRAND.lightText : BRAND.darkText,
               fontWeight: selected ? 700 : 500, fontSize: 14, cursor: disabled ? "default" : "pointer",
               opacity: past ? 0.3 : 1, position: "relative", fontFamily: "'DM Sans', sans-serif",
             }}>
               {d}
-              {blocked && !past && <div style={{ position: "absolute", bottom: 4, left: "50%", transform: "translateX(-50%)", width: 4, height: 4, borderRadius: 2, background: BRAND.red }} />}
+              {dotColor && !past && (
+                <div style={{ position: "absolute", bottom: 3, left: "50%", transform: "translateX(-50%)", width: 5, height: 5, borderRadius: 3, background: dotColor }} />
+              )}
+              {blocked && !past && !dotColor && <div style={{ position: "absolute", bottom: 4, left: "50%", transform: "translateX(-50%)", width: 4, height: 4, borderRadius: 2, background: BRAND.red }} />}
             </button>
           );
         })}
@@ -383,16 +543,56 @@ const BookingPage = ({ settings, bookings, onBook, notify }) => {
   });
 
   const selectedService = settings.services.find(s => s.id === form.service);
+  const serviceType = selectedService?.type || "boarding";
   const totalEstimate = (selectedService?.price || 0) * form.dates.length * form.petCount;
+
+  // Smart scheduling
+  const scheduleMap = getScheduleMap(bookings, settings);
+  const maxCapacity = settings.maxPetsAtHome || 10;
+
+  // Calculate the minimum spots available across all selected dates for this service type
+  const minSpotsOnSelectedDates = form.dates.length > 0
+    ? Math.min(...form.dates.map(d => {
+        const avail = getDateAvailability(d, serviceType, scheduleMap, settings);
+        return avail.spotsLeft;
+      }))
+    : (serviceType === "housesitting" ? 1 : maxCapacity);
+  const maxPetsAllowed = serviceType === "housesitting" ? 1 : Math.max(1, Math.min(minSpotsOnSelectedDates, maxCapacity));
 
   const handleDateSelect = (dateStr) => {
     setForm(prev => {
       const exists = prev.dates.includes(dateStr);
-      return { ...prev, dates: exists ? prev.dates.filter(d => d !== dateStr) : [...prev.dates, dateStr].sort() };
+      const newDates = exists ? prev.dates.filter(d => d !== dateStr) : [...prev.dates, dateStr].sort();
+      // Recalculate max pets when dates change
+      const newSvcType = settings.services.find(s => s.id === prev.service)?.type || "boarding";
+      const newMinSpots = newDates.length > 0
+        ? Math.min(...newDates.map(d => getDateAvailability(d, newSvcType, scheduleMap, settings).spotsLeft))
+        : (newSvcType === "housesitting" ? 1 : maxCapacity);
+      const newMax = newSvcType === "housesitting" ? 1 : Math.max(1, newMinSpots);
+      const newPetCount = Math.min(prev.petCount, newMax);
+      return { ...prev, dates: newDates, petCount: Math.max(1, newPetCount) };
     });
   };
 
+  // When service changes, clear dates (different availability)
+  const handleServiceChange = (serviceId) => {
+    setForm(prev => ({ ...prev, service: serviceId, dates: [], petCount: 1 }));
+  };
+
   const handleSubmit = () => {
+    // Final conflict check
+    const svcType = selectedService?.type || "boarding";
+    for (const date of form.dates) {
+      const avail = getDateAvailability(date, svcType, scheduleMap, settings);
+      if (!avail.available) {
+        notify({ type: "error", message: `${new Date(date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}: ${avail.reason}` });
+        return;
+      }
+      if (svcType !== "visit" && svcType !== "housesitting" && form.petCount > avail.spotsLeft) {
+        notify({ type: "error", message: `Not enough spots on ${new Date(date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}. Only ${avail.spotsLeft} available.` });
+        return;
+      }
+    }
     const booking = {
       id: `bk-${Date.now()}`, ...form,
       serviceName: selectedService?.name, pricePerDay: selectedService?.price,
@@ -400,7 +600,6 @@ const BookingPage = ({ settings, bookings, onBook, notify }) => {
     };
     onBook(booking);
     notify({ type: "success", message: "Booking request submitted! We'll confirm soon." });
-    // Send push notification to admin
     notificationHelper.sendLocal("New Booking Request!", `${form.petName} - ${selectedService?.name} - ${form.dates.length} days`, { tag: "booking" });
     setStep(4);
   };
@@ -421,7 +620,7 @@ const BookingPage = ({ settings, bookings, onBook, notify }) => {
             <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 16px" }}>Choose Your Service</h3>
             <div style={{ display: "grid", gap: 10 }}>
               {settings.services.filter(s => s.enabled).map(s => (
-                <div key={s.id} onClick={() => setForm(prev => ({ ...prev, service: s.id }))} style={{
+                <div key={s.id} onClick={() => handleServiceChange(s.id)} style={{
                   padding: 16, borderRadius: 12, cursor: "pointer",
                   border: `2px solid ${form.service === s.id ? BRAND.red : "rgba(212,32,39,0.1)"}`,
                   background: form.service === s.id ? `${BRAND.red}08` : "transparent",
@@ -437,10 +636,14 @@ const BookingPage = ({ settings, bookings, onBook, notify }) => {
           </Card>
           <Card>
             <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 16px" }}>Select Dates</h3>
-            <Calendar selectedDates={form.dates} onSelectDate={handleDateSelect} blockedDates={settings.blockedDates} />
+            <Calendar selectedDates={form.dates} onSelectDate={handleDateSelect} blockedDates={settings.blockedDates}
+              scheduleMap={scheduleMap} serviceType={serviceType} settings={settings} />
             {form.dates.length > 0 && (
-              <div style={{ marginTop: 16, padding: "12px 16px", background: `${BRAND.red}08`, borderRadius: 10 }}>
+              <div style={{ marginTop: 16, padding: "12px 16px", background: `${BRAND.red}08`, borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.medText }}>{form.dates.length} day{form.dates.length > 1 ? "s" : ""} selected</span>
+                <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: BRAND.lightText }}>
+                  {serviceType === "housesitting" ? "House sit (exclusive)" : serviceType === "visit" ? "Visit" : `Up to ${maxPetsAllowed} pet${maxPetsAllowed !== 1 ? "s" : ""}`}
+                </span>
               </div>
             )}
           </Card>
@@ -456,8 +659,9 @@ const BookingPage = ({ settings, bookings, onBook, notify }) => {
             <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 16px" }}>Pet Details</h3>
             <Input label="Pet's Name" value={form.petName} onChange={e => setForm(p => ({ ...p, petName: e.target.value }))} placeholder="e.g. Barkley" />
             <Input label="Breed" value={form.petBreed} onChange={e => setForm(p => ({ ...p, petBreed: e.target.value }))} placeholder="e.g. Golden Retriever" />
-            <Select label="Number of Pets" value={form.petCount} onChange={e => setForm(p => ({ ...p, petCount: parseInt(e.target.value) }))}
-              options={Array.from({ length: settings.maxPetsAtHome }, (_, i) => ({ value: i + 1, label: `${i + 1} pet${i > 0 ? "s" : ""}` }))} />
+            <Select label={`Number of Pets (max ${maxPetsAllowed} for selected dates)`} value={form.petCount}
+              onChange={e => setForm(p => ({ ...p, petCount: parseInt(e.target.value) }))}
+              options={Array.from({ length: maxPetsAllowed }, (_, i) => ({ value: i + 1, label: `${i + 1} pet${i > 0 ? "s" : ""}` }))} />
             <TextArea label="Special Notes" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Allergies, medications, favorite toys..." />
           </Card>
           <Card>
@@ -793,8 +997,16 @@ const AdminPage = ({ settings, onSaveSettings, bookings, onUpdateBooking, produc
       {tab === "schedule" && (
         <div>
           <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 8px" }}>Daily Capacity Overview</h3>
+            <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.lightText, margin: "0 0 16px" }}>
+              Colored dots show how booked each day is. Max: <strong>{editSettings.maxPetsAtHome} pets/day</strong>
+            </p>
+            <Calendar selectedDates={[]} onSelectDate={() => {}} blockedDates={editSettings.blockedDates}
+              capacityMap={getBookedPetsPerDay(bookings)} maxCapacity={editSettings.maxPetsAtHome} showCapacity={true} />
+          </Card>
+          <Card style={{ marginBottom: 16 }}>
             <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 8px" }}>Block Off Dates</h3>
-            <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.lightText, margin: "0 0 16px" }}>Tap dates to block/unblock. Red dots = blocked.</p>
+            <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.lightText, margin: "0 0 16px" }}>Tap dates to block/unblock. Customers can't book blocked dates.</p>
             <Calendar selectedDates={editSettings.blockedDates} onSelectDate={(dateStr) => {
               const blocked = editSettings.blockedDates;
               const updated = blocked.includes(dateStr) ? blocked.filter(d => d !== dateStr) : [...blocked, dateStr];
@@ -803,11 +1015,37 @@ const AdminPage = ({ settings, onSaveSettings, bookings, onUpdateBooking, produc
             <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: BRAND.lightText, margin: "12px 0 0" }}>{editSettings.blockedDates.length} date{editSettings.blockedDates.length !== 1 ? "s" : ""} blocked</p>
           </Card>
           <Card style={{ marginBottom: 16 }}>
-            <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 16px" }}>Max Pets at Home</h3>
+            <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 8px" }}>Max Pets Per Day</h3>
+            <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.lightText, margin: "0 0 16px" }}>When this limit is reached, the day auto-blocks for new customers.</p>
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               <button onClick={() => setEditSettings(p => ({ ...p, maxPetsAtHome: Math.max(1, p.maxPetsAtHome - 1) }))} style={{ width: 44, height: 44, borderRadius: 12, border: `2px solid ${BRAND.red}`, background: "transparent", color: BRAND.red, fontSize: 22, cursor: "pointer", fontFamily: "'Lilita One', cursive" }}>−</button>
               <span style={{ fontFamily: "'Lilita One', cursive", fontSize: 36, color: BRAND.red, minWidth: 40, textAlign: "center" }}>{editSettings.maxPetsAtHome}</span>
-              <button onClick={() => setEditSettings(p => ({ ...p, maxPetsAtHome: Math.min(10, p.maxPetsAtHome + 1) }))} style={{ width: 44, height: 44, borderRadius: 12, border: `2px solid ${BRAND.red}`, background: "transparent", color: BRAND.red, fontSize: 22, cursor: "pointer", fontFamily: "'Lilita One', cursive" }}>+</button>
+              <button onClick={() => setEditSettings(p => ({ ...p, maxPetsAtHome: Math.min(20, p.maxPetsAtHome + 1) }))} style={{ width: 44, height: 44, borderRadius: 12, border: `2px solid ${BRAND.red}`, background: "transparent", color: BRAND.red, fontSize: 22, cursor: "pointer", fontFamily: "'Lilita One', cursive" }}>+</button>
+            </div>
+          </Card>
+          <Card style={{ marginBottom: 16 }}>
+            <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 8px" }}>Buffer Days</h3>
+            <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.lightText, margin: "0 0 16px" }}>
+              Transition time before and after house sits. Gives you time to travel, clean up, and reset.
+            </p>
+            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+              <button onClick={() => setEditSettings(p => ({ ...p, bufferDays: Math.max(0, (p.bufferDays || 0) - 1) }))} style={{ width: 44, height: 44, borderRadius: 12, border: `2px solid ${BRAND.red}`, background: "transparent", color: BRAND.red, fontSize: 22, cursor: "pointer", fontFamily: "'Lilita One', cursive" }}>−</button>
+              <span style={{ fontFamily: "'Lilita One', cursive", fontSize: 36, color: BRAND.red, minWidth: 40, textAlign: "center" }}>{editSettings.bufferDays || 0}</span>
+              <button onClick={() => setEditSettings(p => ({ ...p, bufferDays: Math.min(5, (p.bufferDays || 0) + 1) }))} style={{ width: 44, height: 44, borderRadius: 12, border: `2px solid ${BRAND.red}`, background: "transparent", color: BRAND.red, fontSize: 22, cursor: "pointer", fontFamily: "'Lilita One', cursive" }}>+</button>
+            </div>
+            <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 12, color: BRAND.lightText, margin: "12px 0 0" }}>
+              {(editSettings.bufferDays || 0) === 0 ? "No buffer — back-to-back bookings allowed" :
+               `${editSettings.bufferDays} day${editSettings.bufferDays > 1 ? 's' : ''} blocked before & after each house sit`}
+            </p>
+          </Card>
+          <Card style={{ marginBottom: 16, background: `${BRAND.red}05` }}>
+            <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 12px" }}>Smart Scheduling Rules</h3>
+            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 13, color: BRAND.medText, lineHeight: 1.8 }}>
+              <div>✅ <strong>Boarding + Day Care</strong> — can overlap (up to max pets)</div>
+              <div>✅ <strong>Drop-In Visits</strong> — always available alongside boarding</div>
+              <div>🚫 <strong>House Sitting</strong> — blocks all other services (you're away)</div>
+              <div>🚫 <strong>Boarding blocks House Sitting</strong> — can't leave pets at home</div>
+              <div>⏳ <strong>Buffer days</strong> — auto-blocked around house sits</div>
             </div>
           </Card>
           <Button size="lg" onClick={saveSettings} style={{ width: "100%" }}>Save Schedule</Button>
