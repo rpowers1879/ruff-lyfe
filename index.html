@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
+  <!-- PWA Meta Tags -->
+  <meta name="theme-color" content="#D42027" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ruff Lyfe" />
+  <meta name="description" content="Ruff Lyfe Pet Services - Book pet sitting, shop for pet products, and more!" />
+  <meta name="mobile-web-app-capable" content="yes" />
+
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="/manifest.json" />
+
+  <!-- Apple Touch Icons -->
+  <link rel="apple-touch-icon" href="/icon-152x152.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192x192.png" />
+  <link rel="apple-touch-icon" sizes="512x512" href="/icon-512x512.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" sizes="96x96" href="/icon-96x96.png" />
+
+  <title>Ruff Lyfe Pet Services</title>
+
+  <!-- Splash screens for iOS -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      margin: 0;
+      background: #FFF8F0;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overscroll-behavior: none;
+    }
+    #root { min-height: 100vh; }
+
+    /* iOS overscroll fix */
+    html { height: 100%; overflow: hidden; }
+    body { height: 100%; overflow: auto; -webkit-overflow-scrolling: touch; }
+
+    /* PWA install banner */
+    .pwa-install-banner {
+      position: fixed;
+      bottom: 80px;
+      left: 16px;
+      right: 16px;
+      max-width: 448px;
+      margin: 0 auto;
+      background: #D42027;
+      color: white;
+      padding: 16px 20px;
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(212, 32, 39, 0.3);
+      z-index: 200;
+      display: none;
+      align-items: center;
+      gap: 14px;
+      font-family: 'DM Sans', sans-serif;
+      animation: slideUp 0.4s ease;
+    }
+    .pwa-install-banner.show { display: flex; }
+    .pwa-install-banner img { width: 44px; height: 44px; border-radius: 10px; }
+    .pwa-install-banner .text { flex: 1; }
+    .pwa-install-banner .text h4 { margin: 0 0 2px; font-size: 15px; font-weight: 700; }
+    .pwa-install-banner .text p { margin: 0; font-size: 12px; opacity: 0.85; }
+    .pwa-install-banner button {
+      background: white;
+      color: #D42027;
+      border: none;
+      padding: 8px 18px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-family: 'Lilita One', cursive;
+    }
+    .pwa-install-banner .close-btn {
+      background: rgba(255,255,255,0.2);
+      color: white;
+      padding: 4px 10px;
+      font-size: 18px;
+      border-radius: 8px;
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- PWA Install Banner -->
+  <div class="pwa-install-banner" id="installBanner">
+    <img src="/icon-96x96.png" alt="Ruff Lyfe" />
+    <div class="text">
+      <h4>Install Ruff Lyfe</h4>
+      <p>Add to your home screen for the best experience</p>
+    </div>
+    <button id="installBtn">Install</button>
+    <button class="close-btn" id="closeBanner">&times;</button>
+  </div>
+
+  <!-- React via CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Lilita+One&display=swap" rel="stylesheet" />
+
+  <script>
+    // =============================================
+    // SERVICE WORKER REGISTRATION
+    // =============================================
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', async () => {
+        try {
+          const registration = await navigator.serviceWorker.register('/sw.js');
+          console.log('SW registered:', registration.scope);
+        } catch (err) {
+          console.log('SW registration failed:', err);
+        }
+      });
+    }
+
+    // =============================================
+    // PWA INSTALL PROMPT
+    // =============================================
+    let deferredPrompt = null;
+    const banner = document.getElementById('installBanner');
+    const installBtn = document.getElementById('installBtn');
+    const closeBtn = document.getElementById('closeBanner');
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      // Show banner after a short delay
+      setTimeout(() => {
+        banner.classList.add('show');
+      }, 3000);
+    });
+
+    installBtn?.addEventListener('click', async () => {
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      console.log('Install outcome:', outcome);
+      deferredPrompt = null;
+      banner.classList.remove('show');
+    });
+
+    closeBtn?.addEventListener('click', () => {
+      banner.classList.remove('show');
+    });
+
+    // Hide banner if already installed
+    window.addEventListener('appinstalled', () => {
+      banner.classList.remove('show');
+      deferredPrompt = null;
+    });
+
+    // iOS install detection - show custom instructions
+    const isIOS = /iphone|ipad|ipod/.test(navigator.userAgent.toLowerCase());
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+
+    if (isIOS && !isStandalone) {
+      setTimeout(() => {
+        banner.classList.add('show');
+        installBtn.textContent = 'How?';
+        installBtn.addEventListener('click', () => {
+          alert('To install:\n\n1. Tap the Share button (box with arrow)\n2. Scroll down and tap "Add to Home Screen"\n3. Tap "Add"\n\nThe app will appear on your home screen!');
+        });
+      }, 5000);
+    }
+  </script>
+
+  <!-- App Script (loaded separately for clarity) -->
+  <script type="text/babel" src="/app.js"></script>
+</body>
+</html>
