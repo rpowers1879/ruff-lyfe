@@ -960,8 +960,7 @@ const ShopPage = ({ products, settings }) => {
           <Card key={product.id} style={{ marginBottom: 16 }}>
             <div style={{ background: `linear-gradient(135deg, ${BRAND.cream} 0%, ${BRAND.warmGray} 100%)`, borderRadius: 12, height: 200, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 16 }}>
               <div style={{ textAlign: "center" }}>
-                <PawIcon size={48} color={BRAND.red} />
-                <p style={{ fontFamily: "'Lilita One', cursive", color: BRAND.red, fontSize: 18, margin: "8px 0 0" }}>{product.name}</p>
+              <img src="/boop-butter.png" alt={product.name} style={{ maxHeight: 160, borderRadius: 12 }} />
               </div>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
