@@ -1239,9 +1239,6 @@ const AdminPage = ({ settings, onSaveSettings, bookings, onUpdateBooking, produc
           <Button size="lg" onClick={saveSettings} style={{ width: "100%" }}>Save Schedule</Button>
         </div>
       )}
-          <Button size="lg" onClick={saveSettings} style={{ width: "100%" }}>Save Schedule</Button>
-        </div>
-      )}
 
       {/* SERVICES */}
       {tab === "services" && (
