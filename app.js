@@ -879,7 +879,7 @@ const BookingPage = ({ settings, bookings, onBook, notify }) => {
           <Card style={{ marginBottom: 20 }}>
             <h3 style={{ fontFamily: "'Lilita One', cursive", fontSize: 16, color: BRAND.darkText, margin: "0 0 16px" }}>Pet Details</h3>
             <Input label="Pet's Name" value={form.petName} onChange={e => setForm(p => ({ ...p, petName: e.target.value }))} placeholder="e.g. Barkley" />
-            <Input label="Breed" value={form.petBreed} onChange={e => setForm(p => ({ ...p, petBreed: e.target.value }))} placeholder="e.g. Golden Retriever" />
+        
             {serviceType === "athome" && (
               <Select label={`Number of Pets (max ${maxPetsAllowed} for selected dates)`} value={form.petCount}
                 onChange={e => setForm(p => ({ ...p, petCount: parseInt(e.target.value) }))}
